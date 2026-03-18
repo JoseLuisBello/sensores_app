@@ -1,5 +1,4 @@
 import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -15,12 +14,14 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Tilt Ball - Física Real',
+      title: 'Acelerómetro',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color.fromARGB(255, 183, 58, 173),
+        ),
         useMaterial3: true,
       ),
-      home: const AcelerometroPage(title: 'Tilt Ball Física'),
+      home: const AcelerometroPage(title: 'Acelerómetro'),
     );
   }
 }
@@ -44,46 +45,40 @@ class _AcelerometroPageState extends State<AcelerometroPage> {
   bool _isInMenu = true;
   bool _gameRunning = false;
   bool _gameOverTriggered = false;
-
   int totalScore = 0;
   int highScore = 0;
   int currentLevelPoints = 10;
-
   String difficultyName = "Normal";
-  int numObstacles = 4;
-
+  int numObstacles = 7;
   List<Map<String, double>> obstacles = [];
   double goalX = 0.0;
   double goalY = 0.0;
-
   double ballX = 0.0;
   double ballY = 0.0;
-  double ballVX = 0.0;
-  double ballVY = 0.0;
-
-  bool _wasCollidingObs = false;
-  bool _wasInGoal = false;
 
   late StreamSubscription<AccelerometerEvent> _accelerometerSubscription;
   SharedPreferences? _prefs;
 
-  // Dimensiones
-  final double playWidth = 380.0;
-  final double playHeight = 550.0;
-  final double ballSize = 35.0;
-  final double obsSize = 40.0;
-  final double goalSize = 45.0;
+  // Para detectar entrada/salida de colisión
+  bool _wasColliding = false;
 
-  final double accelFactor = 1.85;
-  final double friction = 0.935;
-  final double bounceFactor = 0.78;
+  // Dimensiones (aumenté un poco el área para mejor jugabilidad)
+  final double playWidth = 340.0;
+  final double playHeight = 680.0;
+  final double ballSize = 28.0;
+  final double obsSize = 42.0;
+  final double goalSize = 34.0;
+
+  final double sensitivity = 1.1; // un poco más sensible
 
   @override
   void initState() {
     super.initState();
     _loadHighScore();
 
-    _accelerometerSubscription = accelerometerEventStream().listen((AccelerometerEvent event) {
+    _accelerometerSubscription = accelerometerEventStream().listen((
+      AccelerometerEvent event,
+    ) {
       if (!_gameRunning) return;
 
       setState(() {
@@ -92,86 +87,80 @@ class _AcelerometroPageState extends State<AcelerometroPage> {
         z = event.z;
         orientacion = detectarOrientacion(x, y);
 
-        // === FÍSICA REAL ===
-        ballVX += (event.x * -1) * accelFactor;
-        ballVY += event.y * accelFactor;
+        double dx = (event.x * -1) * sensitivity;
+        double dy = event.y * sensitivity;
 
-        ballVX *= friction;
-        ballVY *= friction;
+        double newX = ballX + dx;
+        double newY = ballY + dy;
 
-        double newX = ballX + ballVX;
-        double newY = ballY + ballVY;
+        newX = newX.clamp(0.0, playWidth - ballSize);
+        newY = newY.clamp(0.0, playHeight - ballSize);
 
-        // --- MOVIMIENTO X ---
-        bool hitX = false;
-        if (newX < 0) {
-          newX = 0;
-          ballVX = -ballVX * bounceFactor;
-          hitX = true;
-        } else if (newX > playWidth - ballSize) {
-          newX = playWidth - ballSize;
-          ballVX = -ballVX * bounceFactor;
-          hitX = true;
-        }
-        if (!hitX) {
-          for (var obs in obstacles) {
-            if (_rectsOverlap(newX, ballY, ballSize, ballSize, obs['x']!, obs['y']!, obsSize, obsSize)) {
-              ballVX = -ballVX * bounceFactor;
-              newX = ballX + ballVX;
-              hitX = true;
-              break;
-            }
-          }
-        }
-
-        // --- MOVIMIENTO Y ---
-        bool hitY = false;
-        if (newY < 0) {
-          newY = 0;
-          ballVY = -ballVY * bounceFactor;
-          hitY = true;
-        } else if (newY > playHeight - ballSize) {
-          newY = playHeight - ballSize;
-          ballVY = -ballVY * bounceFactor;
-          hitY = true;
-        }
-        if (!hitY) {
-          for (var obs in obstacles) {
-            if (_rectsOverlap(newX, newY, ballSize, ballSize, obs['x']!, obs['y']!, obsSize, obsSize)) {
-              ballVY = -ballVY * bounceFactor;
-              newY = ballY + ballVY;
-              hitY = true;
-              break;
-            }
-          }
-        }
-
-        ballX = newX.clamp(0.0, playWidth - ballSize);
-        ballY = newY.clamp(0.0, playHeight - ballSize);
-
-        // Colisión con obstáculos (descontar punto)
-        bool nowCollidingObs = false;
+        // Verificar si la nueva posición colisionaría FUERTE (penetración)
+        bool wouldPenetrate = false;
         for (var obs in obstacles) {
-          if (_rectsOverlap(ballX, ballY, ballSize, ballSize, obs['x']!, obs['y']!, obsSize, obsSize)) {
-            nowCollidingObs = true;
+          if (_rectsOverlap(
+            newX,
+            newY,
+            ballSize,
+            ballSize,
+            obs['x']! - 2, // margen pequeño para permitir desliz
+            obs['y']! - 2,
+            obsSize + 4,
+            obsSize + 4,
+          )) {
+            wouldPenetrate = true;
             break;
           }
         }
-        if (nowCollidingObs && _wasCollidingObs) {
+
+        // Permitimos mover si NO penetra más de lo actual
+        if (!wouldPenetrate) {
+          ballX = newX;
+          ballY = newY;
+        }
+
+        // Detectar si AHORA está tocando algún obstáculo
+        bool nowColliding = false;
+        for (var obs in obstacles) {
+          if (_rectsOverlap(
+            ballX,
+            ballY,
+            ballSize,
+            ballSize,
+            obs['x']!,
+            obs['y']!,
+            obsSize,
+            obsSize,
+          )) {
+            nowColliding = true;
+            break;
+          }
+        }
+
+        // Restamos punto SOLO cuando entra en colisión (de no-colisión → colisión)
+        if (nowColliding && !_wasColliding) {
           currentLevelPoints--;
           if (currentLevelPoints <= 0) {
             _triggerGameOver();
           }
         }
-        _wasCollidingObs = nowCollidingObs;
 
-        // Meta (hoyo)
-        bool nowInGoal = _rectsOverlap(
-            ballX, ballY, ballSize, ballSize, goalX, goalY, goalSize, goalSize);
-        if (nowInGoal && !_wasInGoal) {
+        _wasColliding = nowColliding;
+
+        // Meta
+        if (_rectsOverlap(
+          ballX,
+          ballY,
+          ballSize,
+          ballSize,
+          goalX,
+          goalY,
+          goalSize,
+          goalSize,
+        )) {
           _completeLevel();
         }
-        _wasInGoal = nowInGoal;
       });
     });
   }
@@ -181,16 +170,18 @@ class _AcelerometroPageState extends State<AcelerometroPage> {
   }
 
   String detectarOrientacion(double x, double y) {
-    if (x > -5) return "Izquierda";
-    if (x < 5) return "Derecha";
-    if (y > 5) return "Arriba";
-    if (y < -5) return "Abajo";
+    if (x > 4) return "Izquierda";
+    if (x < -4) return "Derecha";
+    if (y > 4) return "Arriba";
+    if (y < -4) return "Abajo";
     return "Estable";
   }
 
   Future<void> _loadHighScore() async {
     _prefs = await SharedPreferences.getInstance();
-    setState(() => highScore = _prefs?.getInt('highScore') ?? 0);
+    setState(() {
+      highScore = _prefs?.getInt('highScore') ?? 0;
+    });
   }
 
   Future<void> _saveHighScore() async {
@@ -200,14 +191,14 @@ class _AcelerometroPageState extends State<AcelerometroPage> {
   void _selectDifficulty(int level) {
     setState(() {
       if (level == 1) {
-        numObstacles = 4;
+        numObstacles = 7;
         difficultyName = "Normal";
       } else if (level == 2) {
-        numObstacles = 7;
+        numObstacles = 11;
         difficultyName = "Medio";
       } else {
-        numObstacles = 12;
-        difficultyName = "Difícil";
+        numObstacles = 16;
+        difficultyName = "Dificil";
       }
     });
     _startNewGame();
@@ -220,14 +211,11 @@ class _AcelerometroPageState extends State<AcelerometroPage> {
       _gameOverTriggered = false;
       totalScore = 0;
       currentLevelPoints = 10;
-      ballVX = 0;
-      ballVY = 0;
       obstacles.clear();
       _generateNewLevel();
       ballX = playWidth / 2 - ballSize / 2;
-      ballY = 40.0;
-      _wasCollidingObs = false;
-      _wasInGoal = false;
+      ballY = 50.0;
+      _wasColliding = false;
     });
   }
 
@@ -237,21 +225,25 @@ class _AcelerometroPageState extends State<AcelerometroPage> {
     obstacles.clear();
 
     final startX = playWidth / 2 - ballSize / 2;
-    final startY = 40.0;
+    final startY = 50.0;
 
+    // Obstáculos
     for (int i = 0; i < numObstacles; i++) {
       int attempts = 0;
-      while (attempts < 100) {
+      while (attempts < 120) {
         attempts++;
         final ox = random.nextDouble() * (playWidth - obsSize);
-        final oy = 80 + random.nextDouble() * (playHeight - obsSize - 170);
+        final oy = 100 + random.nextDouble() * (playHeight - 220 - obsSize);
+
         bool overlap = _rectsOverlap(startX, startY, ballSize, ballSize, ox, oy, obsSize, obsSize);
+
         for (var obs in obstacles) {
           if (_rectsOverlap(ox, oy, obsSize, obsSize, obs['x']!, obs['y']!, obsSize, obsSize)) {
             overlap = true;
             break;
           }
         }
+
         if (!overlap) {
           obstacles.add({'x': ox, 'y': oy});
           break;
@@ -261,19 +253,24 @@ class _AcelerometroPageState extends State<AcelerometroPage> {
 
     // Hoyo
     int attempts = 0;
-    while (attempts < 100) {
+    while (attempts < 120) {
       attempts++;
       goalX = random.nextDouble() * (playWidth - goalSize);
-      goalY = 100 + random.nextDouble() * (playHeight - goalSize - 120);
+      goalY = 140 + random.nextDouble() * (playHeight - 240 - goalSize);
+
       bool overlap = _rectsOverlap(startX, startY, ballSize, ballSize, goalX, goalY, goalSize, goalSize);
+
       for (var obs in obstacles) {
         if (_rectsOverlap(goalX, goalY, goalSize, goalSize, obs['x']!, obs['y']!, obsSize, obsSize)) {
           overlap = true;
           break;
         }
       }
+
       if (!overlap) break;
     }
+
+    _wasColliding = false;
   }
 
   void _completeLevel() {
@@ -284,11 +281,7 @@ class _AcelerometroPageState extends State<AcelerometroPage> {
     }
     _generateNewLevel();
     ballX = playWidth / 2 - ballSize / 2;
-    ballY = 40.0;
-    ballVX = 0;
-    ballVY = 0;
-    _wasCollidingObs = false;
-    _wasInGoal = false;
+    ballY = 50.0;
   }
 
   void _triggerGameOver() {
@@ -298,6 +291,26 @@ class _AcelerometroPageState extends State<AcelerometroPage> {
     }
     _gameRunning = false;
     _gameOverTriggered = true;
+  }
+
+  void _restartLevel() {
+    if (totalScore < 5) return;
+
+    setState(() {
+      totalScore -= 5;
+      _generateNewLevel();
+      ballX = playWidth / 2 - ballSize / 2;
+      ballY = 50.0;
+      _wasColliding = false;
+    });
+  }
+
+  void _endGame() {
+    setState(() {
+      _isInMenu = true;
+      _gameRunning = false;
+      _gameOverTriggered = false;
+    });
   }
 
   @override
@@ -311,7 +324,7 @@ class _AcelerometroPageState extends State<AcelerometroPage> {
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.title),
-        backgroundColor: Colors.deepPurple,
+        backgroundColor: const Color.fromARGB(255, 54, 23, 107),
         foregroundColor: Colors.white,
       ),
       body: _isInMenu ? _buildMenu() : _buildGameScreen(),
@@ -320,35 +333,25 @@ class _AcelerometroPageState extends State<AcelerometroPage> {
 
   Widget _buildMenu() {
     return Container(
-      color: Colors.deepPurple.shade50,
+      color: const Color.fromARGB(255, 42, 20, 75),
       child: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Icon(Icons.sports_soccer, size: 90, color: Colors.deepPurple),
-            const Text(
-              'TILT BALL',
-              style: TextStyle(fontSize: 48, fontWeight: FontWeight.bold, color: Colors.deepPurple),
-            ),
+            const Icon(Icons.sports_soccer, size: 90, color: Color.fromARGB(255, 183, 58, 183)),
+            const Text('Acelerometro', style: TextStyle(fontSize: 48, fontWeight: FontWeight.bold, color: Color.fromARGB(255, 234, 222, 255))),
             const SizedBox(height: 10),
-            Text(
-              'Récord: $highScore',
-              style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold),
-            ),
+            Text('Record: $highScore', style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: Colors.white)),
             const SizedBox(height: 40),
-            const Text('Elige dificultad', style: TextStyle(fontSize: 22)),
+            const Text('Elige la dificultad', style: TextStyle(fontSize: 22, color: Colors.white)),
             const SizedBox(height: 20),
-            _difficultyButton('Normal', Colors.green, 1, '4 obstáculos'),
+            _difficultyButton('Normal', const Color.fromARGB(255, 26, 116, 190), 1, '7 obstaculos'),
             const SizedBox(height: 15),
-            _difficultyButton('Medio', Colors.orange, 2, '7 obstáculos'),
+            _difficultyButton('Medio', const Color.fromARGB(255, 212, 197, 53), 2, '11 obstaculos'),
             const SizedBox(height: 15),
-            _difficultyButton('Difícil', Colors.red, 3, '12 obstáculos'),
+            _difficultyButton('Dificil', const Color.fromARGB(255, 219, 49, 37), 3, '16 obstaculos'),
             const SizedBox(height: 30),
-            const Text(
-              'Inclina el teléfono\n¡Los obstáculos REBOTAN!',
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 16),
-            ),
+            const Text('Inclina el telefono y\n¡Evita los obstaculos!', textAlign: TextAlign.center, style: TextStyle(fontSize: 16, color: Colors.white)),
           ],
         ),
       ),
@@ -374,156 +377,165 @@ class _AcelerometroPageState extends State<AcelerometroPage> {
   }
 
   Widget _buildGameScreen() {
-    return Stack(
+    return Column(
       children: [
-        // Contenido normal del juego
-        Column(
-          children: [
-            Container(
-              padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 20),
-              color: Colors.deepPurple,
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text('Total: $totalScore',
-                      style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: Colors.white)),
-                  Text('Nivel: $currentLevelPoints',
-                      style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: Colors.white)),
-                  Text(difficultyName,
-                      style: const TextStyle(fontSize: 20, color: Colors.white70)),
-                ],
-              ),
-            ),
-            Center(
-              child: Container(
-                width: playWidth,
-                height: playHeight,
-                margin: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF2E7D32),
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: Colors.brown, width: 14),
-                  boxShadow: const [BoxShadow(color: Colors.black38, blurRadius: 25, spreadRadius: 5)],
-                ),
-                child: Stack(
-                  children: [
-                    // Pelota
-                    Positioned(
-                      left: ballX,
-                      top: ballY,
-                      child: Container(
-                        width: ballSize,
-                        height: ballSize,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          gradient: const RadialGradient(
-                            colors: [Colors.white, Colors.red, Colors.redAccent],
-                            center: Alignment(-0.4, -0.4),
-                            radius: 0.8,
-                          ),
-                          boxShadow: const [BoxShadow(color: Colors.black45, blurRadius: 12, offset: Offset(4, 6))],
-                        ),
-                      ),
-                    ),
-                    // Obstáculos
-                    for (var obs in obstacles)
-                      Positioned(
-                        left: obs['x']!,
-                        top: obs['y']!,
-                        child: Container(
-                          width: obsSize,
-                          height: obsSize,
-                          decoration: BoxDecoration(
-                            color: Colors.orange.shade900,
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(color: Colors.orange.shade700, width: 4),
-                            boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 8)],
-                          ),
-                        ),
-                      ),
-                    // Hoyo
-                    Positioned(
-                      left: goalX,
-                      top: goalY,
-                      child: Container(
-                        width: goalSize,
-                        height: goalSize,
-                        decoration: BoxDecoration(
-                          color: Colors.black87,
-                          shape: BoxShape.circle,
-                          border: Border.all(color: Colors.yellowAccent, width: 7),
-                          boxShadow: const [BoxShadow(color: Colors.yellow, blurRadius: 20, spreadRadius: 4)],
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                children: [
-                  Text('Orientación: $orientacion',
-                      style: const TextStyle(fontSize: 18, color: Colors.deepPurple)),
-                  const SizedBox(height: 8),
-                  const Text(
-                    'Inclina el teléfono • Los obstáculos REBOTAN\n¡No los traspases!',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 15),
-                  ),
-                ],
-              ),
-            ),
-          ],
+        Container(
+          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 20),
+          color: const Color.fromARGB(255, 70, 25, 136),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('Puntos: $totalScore', style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: Colors.white)),
+              Text('Dificultad: $difficultyName', style: const TextStyle(fontSize: 15, color: Colors.white70)),
+            ],
+          ),
         ),
 
-        // GAME OVER OVERLAY (CORREGIDO - cubre toda la pantalla)
-        if (_gameOverTriggered)
-          Positioned.fill(
-            child: Container(
-              color: Colors.black87.withOpacity(0.92),
-              child: Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(Icons.gamepad, size: 90, color: Colors.redAccent),
-                    const SizedBox(height: 20),
-                    const Text(
-                      '¡GAME OVER!',
-                      style: TextStyle(fontSize: 48, fontWeight: FontWeight.bold, color: Colors.red),
+        Expanded(
+          child: Stack(
+            children: [
+              Container(
+                color: Colors.black87,
+                child: Center(
+                  child: Container(
+                    width: playWidth,
+                    height: playHeight,
+                    margin: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: const Color.fromARGB(255, 55, 55, 62),
+                      borderRadius: BorderRadius.circular(24),
+                      border: Border.all(color: Colors.deepPurpleAccent, width: 6),
+                      boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 20, spreadRadius: 6)],
                     ),
-                    const SizedBox(height: 15),
-                    Text(
-                      'Puntaje final: $totalScore',
-                      style: const TextStyle(fontSize: 32, color: Colors.white, fontWeight: FontWeight.bold),
+                    child: Stack(
+                      children: [
+                        // Pelota
+                        Positioned(
+                          left: ballX,
+                          top: ballY,
+                          child: Container(
+                            width: ballSize,
+                            height: ballSize,
+                            decoration: const BoxDecoration(
+                              shape: BoxShape.circle,
+                              gradient: RadialGradient(colors: [Colors.white70, Colors.white], center: Alignment(-0.4, -0.4), radius: 0.9),
+                              boxShadow: [BoxShadow(color: Colors.black45, blurRadius: 10, offset: Offset(3, 5))],
+                            ),
+                          ),
+                        ),
+                        // Obstáculos
+                        for (var obs in obstacles)
+                          Positioned(
+                            left: obs['x']!,
+                            top: obs['y']!,
+                            child: Container(
+                              width: obsSize,
+                              height: obsSize,
+                              decoration: BoxDecoration(
+                                color: Colors.black87,
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: Colors.redAccent.shade700, width: 4),
+                                boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 8)],
+                              ),
+                            ),
+                          ),
+                        // Hoyo
+                        Positioned(
+                          left: goalX,
+                          top: goalY,
+                          child: Container(
+                            width: goalSize,
+                            height: goalSize,
+                            decoration: BoxDecoration(
+                              color: Colors.black87,
+                              shape: BoxShape.circle,
+                              border: Border.all(color: Colors.yellowAccent, width: 7),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
-                    Text(
-                      'Récord: $highScore',
-                      style: const TextStyle(fontSize: 26, color: Colors.yellowAccent),
-                    ),
-                    const SizedBox(height: 40),
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.deepPurple,
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(horizontal: 50, vertical: 18),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                  ),
+                ),
+              ),
+
+              if (_gameOverTriggered)
+                Positioned.fill(
+                  child: Container(
+                    color: Colors.black87,
+                    child: Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.sentiment_dissatisfied, size: 90, color: Colors.redAccent),
+                          const SizedBox(height: 20),
+                          const Text('¡GAME OVER!', style: TextStyle(fontSize: 48, fontWeight: FontWeight.bold, color: Colors.red)),
+                          const SizedBox(height: 16),
+                          Text('Puntaje final: $totalScore', style: const TextStyle(fontSize: 32, color: Colors.white, fontWeight: FontWeight.bold)),
+                          Text('Récord: $highScore', style: const TextStyle(fontSize: 24, color: Colors.yellowAccent)),
+                          const SizedBox(height: 40),
+                          ElevatedButton(
+                            style: ElevatedButton.styleFrom(backgroundColor: Colors.deepPurple, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 50, vertical: 16)),
+                            onPressed: () {
+                              setState(() {
+                                _isInMenu = true;
+                                _gameOverTriggered = false;
+                              });
+                            },
+                            child: const Text('Volver al Menú', style: TextStyle(fontSize: 20)),
+                          ),
+                        ],
                       ),
-                      onPressed: () {
-                        setState(() {
-                          _isInMenu = true;
-                          _gameOverTriggered = false;
-                          totalScore = 0;
-                        });
-                      },
-                      child: const Text('Volver al Menú', style: TextStyle(fontSize: 22)),
                     ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+
+        // Botones inferiores - fondo NEGRO
+        Container(
+          color: Colors.black,
+          padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              ElevatedButton(
+                onPressed: totalScore >= 5 ? _restartLevel : null,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.black,
+                  foregroundColor: Colors.white,
+                  elevation: 6,
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    side: const BorderSide(color: Colors.grey, width: 1.5),
+                  ),
+                ),
+                child: const Column(
+                  children: [
+                    Text('Reiniciar Nivel', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.grey)),
+                    Text('(-5 pts)', style: TextStyle(fontSize: 12, color: Colors.grey)),
                   ],
                 ),
               ),
-            ),
+              ElevatedButton(
+                onPressed: _endGame,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.black,
+                  foregroundColor: Colors.white,
+                  elevation: 6,
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    side: const BorderSide(color: Colors.redAccent, width: 1.5),
+                  ),
+                ),
+                child: const Text('Terminar Partida', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              ),
+            ],
           ),
+        ),
       ],
     );
   }
